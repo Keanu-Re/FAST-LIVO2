@@ -1,3 +1,22 @@
+/**
+* IMU 处理类,用于处理 IMU 数据和点云去畸变
+* 
+* 主要功能:
+* - IMU 数据初始化,包括重力、陀螺仪偏置、加速度和陀螺仪协方差等参数估计
+* - IMU 数据前向传播,更新系统状态(位置、速度、姿态等)
+* - 基于 IMU 数据对激光点云进行运动补偿去畸变
+* - 支持纯激光里程计模式(无 IMU)和 LIO/VIO 模式
+*
+* 关键参数:
+* - cov_acc: 加速度测量协方差
+* - cov_gyr: 陀螺仪测量协方差  
+* - cov_bias_gyr: 陀螺仪偏置协方差
+* - cov_bias_acc: 加速度偏置协方差
+* - Lid_offset_to_IMU: 激光雷达相对 IMU 的外参平移
+* - Lid_rot_to_IMU: 激光雷达相对 IMU 的外参旋转
+*
+* @note 该模块是 FAST-LIVO2 系统的核心组件之一,负责 IMU 数据处理和点云去畸变
+*/
 /* 
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
@@ -80,6 +99,11 @@ void ImuProcess::set_extrinsic(const MD(4, 4) & T)
   Lid_rot_to_IMU = T.block<3, 3>(0, 0);
 }
 
+/**
+ * @brief 设置IMU与激光雷达之间的外参平移量
+ * @param[in] transl 3D平移向量,表示从激光雷达坐标系到IMU坐标系的平移变换
+ * @details 设置激光雷达相对于IMU的位置偏移,旋转矩阵设为单位阵
+ */
 void ImuProcess::set_extrinsic(const V3D &transl)
 {
   Lid_offset_to_IMU = transl;
@@ -104,6 +128,20 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a) { cov_bias_acc = b_a; }
 
 void ImuProcess::set_imu_init_frame_num(const int &num) { MAX_INI_COUNT = num; }
 
+/**
+ * @brief IMU初始化函数,用于初始化重力、陀螺仪偏差、加速度和陀螺仪协方差
+ * 
+ * @param meas IMU测量数据组,包含多个IMU测量值
+ * @param state_inout 状态变量组,用于存储初始化结果
+ * @param N 初始化计数器
+ * 
+ * @details 该函数主要完成以下工作:
+ * 1. 如果是第一帧数据,重置相关变量并初始化平均加速度和角速度
+ * 2. 遍历所有IMU数据,计算加速度和角速度的累计平均值
+ * 3. 根据平均加速度计算重力向量
+ * 4. 初始化旋转矩阵和陀螺仪偏差
+ * 5. 更新最后一个IMU数据
+ */
 void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
@@ -151,6 +189,19 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
   last_imu = meas.imu.back();
 }
 
+/**
+ * @brief 在没有IMU数据的情况下对激光雷达数据进行前向传播处理
+ * 
+ * 该函数主要完成以下功能:
+ * 1. 对点云按时间戳进行排序
+ * 2. 计算系统状态的协方差传播
+ * 3. 更新系统状态(旋转和位置)
+ * 4. 对点云进行运动畸变补偿(L515激光雷达除外)
+ * 
+ * @param meas 激光雷达测量数据组
+ * @param state_inout 系统状态量,包含位姿、速度、偏置等信息
+ * @param pcl_out 输出的点云数据
+ */
 void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
   pcl_out = *(meas.lidar);
@@ -237,6 +288,20 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 }
 
 
+/**
+ * @brief 对激光点云进行运动畸变校正
+ * 
+ * 该函数使用IMU数据对激光点云进行运动畸变校正。主要步骤包括:
+ * 1. 将上一帧IMU数据添加到当前帧IMU数据序列头部
+ * 2. 对IMU数据进行前向传播,计算每个IMU时刻的位姿
+ * 3. 对每个激光点进行反向传播,将其变换到帧结束时刻
+ * 
+ * @param lidar_meas 激光测量数据组,包含点云和IMU数据
+ * @param state_inout 输入输出状态量,包含位姿、速度、偏置等
+ * @param pcl_out 输出校正后的点云
+ * 
+ * @note 该函数仅在LIO模式下进行点云运动畸变校正
+ */
 void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
   double t0 = omp_get_wtime();
@@ -542,6 +607,20 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   // printf("[ IMU ] time forward: %lf, backward: %lf.\n", t1 - t0, omp_get_wtime() - t1);
 }
 
+/**
+ * @brief IMU 数据处理函数,用于处理激光雷达和IMU数据的融合
+ * 
+ * @param lidar_meas 激光雷达测量数据组
+ * @param stat 系统状态组,包含位姿等状态信息
+ * @param cur_pcl_un_ 当前未去畸变点云指针
+ * 
+ * @details 该函数主要完成以下功能:
+ *          1. 如果未启用IMU,则直接进行无IMU的前向处理
+ *          2. 如果IMU需要初始化,进行IMU初始化过程
+ *          3. IMU初始化完成后,对点云进行去畸变处理
+ *          
+ * @note IMU初始化过程包括重力对齐和噪声参数估计
+ */
 void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   double t1, t2, t3;

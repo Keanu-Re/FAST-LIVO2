@@ -20,6 +20,24 @@ which is included as part of this source code package.
 class Feature;
 
 /// A visual map point on the surface of the scene.
+/**
+ * @brief 视觉特征点类
+ * 
+ * 该类表示三维空间中的视觉特征点,包含点的位置、法向量、观测信息等属性。
+ * 用于视觉SLAM中的特征点管理和跟踪。
+ * 
+ * 主要属性:
+ * - 3D位置(pos_)
+ * - 表面法向量(normal_)及其协方差信息(normal_information_) 
+ * - 观测到该点的特征(obs_)
+ * - 点的协方差矩阵(covariance_)
+ * - 收敛状态标志(is_converged_)
+ * - 法向量初始化标志(is_normal_initialized_)
+ * - 参考patch相关信息(has_ref_patch_, ref_patch)
+ * 
+ * 该类继承自boost::noncopyable,禁止拷贝构造和赋值操作。
+ * 使用EIGEN_MAKE_ALIGNED_OPERATOR_NEW保证内存对齐。
+ */
 class VisualPoint : boost::noncopyable
 {
 public:

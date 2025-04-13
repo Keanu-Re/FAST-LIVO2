@@ -1,3 +1,22 @@
+/**
+ * @brief Frame类 - 视觉里程计中的单帧图像处理类
+ * 
+ * 该类用于处理和存储单帧图像数据,包含以下主要功能:
+ * - 图像金字塔构建
+ * - 特征点管理
+ * - 相机模型关联
+ * 
+ * @param cam 相机模型指针
+ * @param img 输入的灰度图像
+ * 
+ * frame_utils命名空间:
+ * @namespace frame_utils 提供Frame类相关的工具函数
+ * @function createImgPyramid 创建图像金字塔
+ * - 输入参数:
+ *   @param img_level_0 原始图像(金字塔第0层)
+ *   @param n_levels 金字塔层数
+ *   @param pyr 输出的图像金字塔
+ */
 /* 
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 

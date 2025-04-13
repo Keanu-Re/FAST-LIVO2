@@ -1,3 +1,27 @@
+/**
+ * @brief 体素地图管理器类
+ * 
+ * 该类负责管理和维护基于八叉树的体素地图结构。主要功能包括:
+ * - 构建和更新体素地图
+ * - 进行状态估计和残差计算 
+ * - 发布地图可视化信息
+ * - 实现地图滑动窗口
+ *
+ * @details
+ * 主要成员函数:
+ * - BuildVoxelMap(): 构建初始体素地图
+ * - UpdateVoxelMap(): 更新体素地图
+ * - StateEstimation(): 进行状态估计
+ * - BuildResidualListOMP(): 并行构建残差列表
+ * - mapSliding(): 实现地图滑动窗口
+ * 
+ * 重要参数:
+ * - max_layer_: 最大八叉树层数
+ * - voxel_size: 体素大小
+ * - planer_threshold_: 平面判定阈值
+ * 
+ * @note 该类实现了基于体素的地图表示方法,适用于大规模环境的实时建图和定位
+ */
 /* 
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
@@ -33,6 +57,16 @@ void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_
   cov = direction * range_var * direction.transpose() + A * direction_var * A.transpose();
 }
 
+/**
+ * @brief 加载体素地图相关配置参数
+ * @param[in] node ROS2节点指针,用于声明和获取参数
+ * @param[out] voxel_config 体素地图配置结构体,存储加载的参数
+ * 
+ * 该函数从ROS2参数服务器加载体素地图所需的配置参数,包括:
+ * - 地图发布相关参数
+ * - LIO算法参数(最大层数、体素大小、特征值阈值等)
+ * - 局部地图参数(滑动窗口大小、滑动阈值等)
+ */
 void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config)
 {
   // declare parameter
@@ -68,6 +102,26 @@ void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config
   node->get_parameter("local_map.sliding_thresh", voxel_config.sliding_thresh);
 }
 
+/**
+ * @brief 初始化体素平面参数
+ * 
+ * 该函数用于计算和初始化体素平面的各项参数,包括:
+ * - 平面协方差矩阵
+ * - 平面中心点
+ * - 平面法向量 
+ * - 特征值和特征向量
+ * - 平面方差
+ * 
+ * @param points 输入的带方差的点云数据
+ * @param plane 待初始化的体素平面指针
+ * 
+ * @details 函数主要步骤:
+ * 1. 计算点云的协方差矩阵和中心点
+ * 2. 对协方差矩阵进行特征值分解
+ * 3. 根据最小特征值判断是否为平面
+ * 4. 如果是平面,计算平面参数和方差
+ * 5. 更新平面状态标志
+ */
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
 {
   plane->plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
@@ -150,6 +204,18 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   }
 }
 
+/**
+ * @brief 初始化八叉树结构
+ * 
+ * 该函数根据临时点云数据初始化八叉树。当点云数量超过阈值时:
+ * 1. 首先尝试拟合平面
+ * 2. 如果能拟合成平面，将八叉树状态设为0
+ *    - 若点数超过最大限制，则禁用更新并清空临时点云
+ * 3. 如果不能拟合成平面，将八叉树状态设为1，并进行八叉树分割
+ * 4. 完成初始化后重置新点计数
+ * 
+ * 该函数是体素八叉树构建的关键步骤，用于确定是否需要进行空间细分。
+ */
 void VoxelOctoTree::init_octo_tree()
 {
   if (temp_points_.size() > points_size_threshold_)
@@ -176,6 +242,19 @@ void VoxelOctoTree::init_octo_tree()
   }
 }
 
+/**
+ * @brief 对八叉树进行分割操作
+ * 
+ * 该函数实现了八叉树的递归分割。当一个体素内的点数超过阈值时,会判断这些点是否能够
+ * 形成平面。如果不能形成平面,则继续将该体素分割成8个子体素。具体步骤如下:
+ * 1. 检查是否达到最大层数,若是则将状态设为叶子节点(0)并返回
+ * 2. 根据点的空间位置将其分配到8个子体素中
+ * 3. 对每个非空的子体素:
+ *    - 若点数超过阈值,则尝试拟合平面
+ *    - 若能拟合平面,将子体素标记为叶子节点
+ *    - 若不能拟合平面,递归进行分割
+ * 4. 对超出最大点数的叶子节点禁用更新
+ */
 void VoxelOctoTree::cut_octo_tree()
 {
   if (layer_ >= max_layer_)
@@ -232,6 +311,17 @@ void VoxelOctoTree::cut_octo_tree()
   }
 }
 
+/**
+ * @brief 更新八叉树结构
+ * 
+ * 该函数用于向体素八叉树中添加新的点云数据。根据不同情况进行处理:
+ * 1. 如果八叉树未初始化,将点存入临时缓存,达到阈值后初始化树结构
+ * 2. 如果当前节点已经是平面,则根据更新策略添加点
+ * 3. 如果未达到最大层数,根据点的空间位置将其添加到对应的子节点
+ * 4. 如果达到最大层数,则作为叶子节点处理
+ * 
+ * @param pv 待添加的点云数据,包含点的位置和方差信息
+ */
 void VoxelOctoTree::UpdateOctoTree(const pointWithVar &pv)
 {
   if (!init_octo_)
@@ -305,6 +395,16 @@ void VoxelOctoTree::UpdateOctoTree(const pointWithVar &pv)
   }
 }
 
+/**
+ * @brief 在八叉树中查找给定三维点所对应的体素节点
+ * @param pw 输入的三维点坐标(Eigen::Vector3d类型)
+ * @return 返回对应的体素八叉树节点指针
+ * 
+ * 该函数递归地在八叉树中搜索包含输入点pw的体素节点。
+ * 如果当前节点未初始化、是平面节点或已达到最大层数，则返回当前节点。
+ * 否则根据输入点相对于当前体素中心的位置，确定其所在的子节点序号(0-7),
+ * 并继续在对应子节点中递归查找。
+ */
 VoxelOctoTree *VoxelOctoTree::find_correspond(Eigen::Vector3d pw)
 {
   if (!init_octo_ || plane_ptr_->is_plane_ || (layer_ >= max_layer_)) return this;
@@ -320,6 +420,19 @@ VoxelOctoTree *VoxelOctoTree::find_correspond(Eigen::Vector3d pw)
   return (leaves_[leafnum] != nullptr) ? leaves_[leafnum]->find_correspond(pw) : this;
 }
 
+/**
+ * @brief 向八叉树中插入一个带方差的点
+ * @param pv 待插入的带方差点
+ * @return 返回插入点所在的八叉树节点指针
+ * 
+ * 该函数根据以下规则插入点:
+ * 1. 如果节点未初始化,或节点是平面,或已达到最大层数,则将点暂存并返回当前节点
+ * 2. 如果节点已初始化且非平面,且未达到最大层数,则:
+ *    - 根据点的坐标确定其所属的子节点
+ *    - 如果子节点存在,则递归插入到子节点
+ *    - 如果子节点不存在,则创建新的子节点并插入
+ * 3. 其他情况返回空指针
+ */
 VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 {
   if ((!init_octo_) || (init_octo_ && plane_ptr_->is_plane_) || (init_octo_ && (!plane_ptr_->is_plane_) && (layer_ >= max_layer_)))
@@ -351,6 +464,24 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
   return nullptr;
 }
 
+以下是该函数的中文文档注释:
+
+/**
+ * @brief 状态估计函数,使用迭代卡尔曼滤波进行位姿优化
+ * 
+ * 该函数通过以下步骤实现状态估计:
+ * 1. 计算特征点的协方差和叉积矩阵
+ * 2. 构建残差列表
+ * 3. 迭代进行卡尔曼滤波更新:
+ *    - 计算测量雅可比矩阵H
+ *    - 计算卡尔曼增益
+ *    - 更新状态估计
+ *    - 判断收敛条件
+ *    - 更新协方差矩阵
+ * 
+ * @param state_propagat 传入的状态预测值
+ * @note 该函数会更新类内部的状态变量 state_
+ */
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
   cross_mat_list_.clear();
@@ -526,6 +657,18 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   // cout << "[ Mapping ] ave_ekf_time: " << ave_ekf_time << "s, ave_build_residual_time: " << ave_build_residual_time << "s" << endl;
 }
 
+/**
+ * @brief 对激光点云进行坐标变换
+ * 
+ * @param rot 旋转矩阵(3x3)
+ * @param t 平移向量(3x1)
+ * @param input_cloud 输入点云
+ * @param trans_cloud 变换后的点云
+ * 
+ * @details 该函数将输入点云通过外参矩阵(extR_, extT_)和给定的位姿变换(rot, t)
+ *          转换到目标坐标系下。变换过程保留点云的强度信息。
+ *          转换公式: p_out = rot * (extR_ * p_in + extT_) + t
+ */
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
                                      pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud)
 {
@@ -545,6 +688,18 @@ void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vec
   }
 }
 
+/**
+ * @brief 构建体素地图
+ * 
+ * 该函数将点云数据构建成体素地图结构。主要步骤如下：
+ * 1. 根据配置参数初始化体素地图相关参数
+ * 2. 计算每个点的世界坐标系下的位置和协方差
+ * 3. 将点云数据按照体素大小进行划分,并存储到对应的体素中
+ * 4. 对每个体素创建八叉树结构
+ * 
+ * @note 函数内部使用体素的位置作为键值来组织地图结构
+ * @note 每个体素包含一个八叉树用于组织其内部的点云数据
+ */
 void VoxelMapManager::BuildVoxelMap()
 {
   float voxel_size = config_setting_.max_voxel_size_;
@@ -606,6 +761,15 @@ void VoxelMapManager::BuildVoxelMap()
   }
 }
 
+/**
+ * @brief 根据体素位置生成对应的 RGB 颜色值
+ * @param input_point 输入的三维点坐标 (x,y,z)
+ * @return 返回一个三维向量表示的 RGB 颜色值 (R,G,B)
+ * 
+ * 该函数将输入点坐标除以体素大小得到体素位置索引,
+ * 然后根据索引值生成一个固定的 RGB 颜色。
+ * 生成的颜色只包含红、绿、蓝三种纯色,用于体素的可视化显示。
+ */
 V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
 {
   int64_t loc_xyz[3];
@@ -622,6 +786,23 @@ V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
   return RGB;
 }
 
+/**
+ * @brief 更新体素地图
+ * 
+ * 该函数将输入的点云数据更新到体素地图中。对每个输入点，根据其空间位置确定其所属的体素，
+ * 并更新或创建相应的八叉树结构。
+ * 
+ * @param input_points 输入的带方差的点云数据向量
+ * 
+ * @details
+ * - 根据配置参数初始化体素大小、平面阈值等参数
+ * - 对每个输入点进行以下处理：
+ *   1. 计算点所在的体素位置
+ *   2. 如果该位置已存在体素，则更新其八叉树
+ *   3. 如果该位置不存在体素，则创建新的八叉树结构并初始化相关参数
+ * 
+ * @note 体素的位置由整数坐标(x,y,z)唯一确定，体素中心位置会自动计算
+ */
 void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_points)
 {
   float voxel_size = config_setting_.max_voxel_size_;
@@ -656,6 +837,17 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
   }
 }
 
+/**
+ * @brief 构建点到平面残差列表(使用OpenMP并行优化)
+ * @details 该函数遍历输入的点云列表,为每个点寻找对应的体素,计算点到平面的残差。
+ *          如果点不在当前体素内,会尝试寻找相邻体素。使用互斥锁保护并行写入。
+ * 
+ * @param pv_list 输入的带方差点云列表
+ * @param ptpl_list 输出的点到平面残差列表
+ * 
+ * @note 函数内部使用 OpenMP 进行并行计算以提高性能
+ * @note 使用互斥锁(mutex)保护并行写入操作
+ */
 void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, std::vector<PointToPlane> &ptpl_list)
 {
   int max_layer = config_setting_.max_layer_;
@@ -726,6 +918,21 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
   }
 }
 
+/**
+ * @brief 构建单个点到平面的残差
+ * @param[in,out] pv 带方差的点云数据
+ * @param[in] current_octo 当前八叉树节点
+ * @param[in] current_layer 当前层数
+ * @param[out] is_sucess 是否成功构建残差
+ * @param[in,out] prob 概率值
+ * @param[out] single_ptpl 点到平面的残差结构
+ * 
+ * 该函数用于在体素地图中构建点云到平面的残差。主要步骤:
+ * 1. 检查当前节点是否为平面
+ * 2. 如果是平面,计算点到平面距离和范围距离
+ * 3. 在有效范围内,计算雅可比矩阵和方差,判断是否构建残差
+ * 4. 如果不是平面且未达到最大层数,递归遍历子节点
+ */
 void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTree *current_octo, const int current_layer, bool &is_sucess,
                                             double &prob, PointToPlane &single_ptpl)
 {
@@ -801,6 +1008,19 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
   }
 }
 
+/**
+ * @brief 发布体素地图可视化信息
+ * 
+ * 该函数将体素地图中的平面信息转换为可视化消息并发布。主要步骤包括：
+ * 1. 遍历体素地图中的所有体素
+ * 2. 获取每个体素的平面信息
+ * 3. 根据平面的协方差矩阵计算颜色
+ * 4. 将平面信息转换为可视化标记
+ * 5. 发布可视化消息
+ * 
+ * 颜色映射使用 Jet 色彩方案，基于平面协方差的迹来确定。
+ * 平面的透明度由 is_plane_ 标志决定。
+ */
 void VoxelMapManager::pubVoxelMap()
 {
   double max_trace = 0.25;
@@ -833,6 +1053,17 @@ void VoxelMapManager::pubVoxelMap()
   loop.sleep();
 }
 
+/**
+ * @brief 获取需要更新的平面信息
+ * @param current_octo 当前八叉树节点指针
+ * @param pub_max_voxel_layer 最大发布体素层级
+ * @param plane_list 存储需要更新的平面列表
+ * 
+ * 该函数递归遍历八叉树结构，收集需要更新的平面信息。
+ * 如果当前节点层级超过最大发布层级则返回。
+ * 如果当前节点的平面标记为需要更新，则将其加入平面列表。
+ * 如果当前节点不是平面且未达到最大层级，则继续遍历其子节点。
+ */
 void VoxelMapManager::GetUpdatePlane(const VoxelOctoTree *current_octo, const int pub_max_voxel_layer, std::vector<VoxelPlane> &plane_list)
 {
   if (current_octo->layer_ > pub_max_voxel_layer) { return; }
@@ -850,6 +1081,19 @@ void VoxelMapManager::GetUpdatePlane(const VoxelOctoTree *current_octo, const in
   return;
 }
 
+/**
+ * @brief 发布单个平面的可视化标记
+ * 
+ * @param plane_pub 平面标记数组消息
+ * @param plane_ns 平面的命名空间
+ * @param single_plane 要发布的单个平面
+ * @param alpha 透明度值
+ * @param rgb RGB颜色值
+ * 
+ * @details 该函数将单个平面转换为ROS可视化标记(Marker)并添加到标记数组中。
+ * 使用圆柱体(CYLINDER)表示平面，其位置、方向和尺寸由平面的特征值决定。
+ * 标记的颜色和透明度可通过参数控制，标记的生命周期设为0.01秒。
+ */
 void VoxelMapManager::pubSinglePlane(visualization_msgs::msg::MarkerArray &plane_pub, const std::string plane_ns, const VoxelPlane &single_plane,
                                      const float alpha, const Eigen::Vector3d rgb)
 {

@@ -1,4 +1,26 @@
 /* 
+这是 FAST-LIVO2 的一部分: 一个快速的直接法激光-惯性-视觉里程计系统。
+
+开发者: 郑春然 <zhengcr@connect.hku.hk>
+
+商业使用请联系:
+- 郑春然 <zhengcr@connect.hku.hk> 或
+- 张福教授 <fuzhang@hku.hk>
+
+本文件遵循 'LICENSE' 文件中规定的条款和条件,
+该文件作为本源代码包的一部分提供。
+
+该文件实现了视觉里程计(VIO)的核心功能,包括:
+- 视觉特征点的跟踪和管理
+- 图像金字塔处理
+- 光度误差最小化
+- EKF状态估计更新
+- 视觉地图点的生成和维护
+
+主要类:
+VIOManager - 管理视觉里程计的所有功能
+*/
+/* 
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
 Developer: Chunran Zheng <zhengcr@connect.hku.hk>
@@ -33,12 +55,32 @@ void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
   Rli = rot.transpose();
 }
 
+/**
+ * @brief 设置激光雷达到相机的外参矩阵
+ * @param[in] R 旋转矩阵,以一维数组形式存储的3x3矩阵
+ * @param[in] P 平移向量,以一维数组形式存储的3x1向量
+ * @details 将输入的旋转矩阵R和平移向量P转换为Eigen格式,并分别存储到成员变量Rcl和Pcl中
+ */
 void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
 {
   Rcl << MAT_FROM_ARRAY(R);
   Pcl << VEC_FROM_ARRAY(P);
 }
 
+/**
+ * @brief 初始化视觉惯性里程计(VIO)系统
+ * 
+ * 该函数完成以下初始化工作:
+ * - 创建稀疏地图子系统
+ * - 设置相机内参(焦距、光心等)
+ * - 计算相机与IMU之间的外参变换矩阵
+ * - 设置图像网格划分参数
+ * - 如果启用光线投射,预计算每个网格的采样点
+ * - 如果启用COLMAP输出,初始化相关文件
+ * - 分配特征跟踪所需的内存空间
+ * 
+ * 该函数在VIO系统启动时调用一次,用于系统初始化。
+ */
 void VIOManager::initializeVIO()
 {
   visual_submap = new SubSparseMap;
@@ -160,6 +202,18 @@ void VIOManager::initializeVIO()
   sub_feat_map.clear();
 }
 
+/**
+ * @brief 重置网格数据结构
+ * 
+ * 该函数重置所有网格相关的数据结构到初始状态:
+ * - 清空网格类型标记
+ * - 重置地图索引
+ * - 重置距离值
+ * - 清空更新标志
+ * - 重置扫描值
+ * - 清空并重新分配体素点云缓存
+ * - 重置点云总数
+ */
 void VIOManager::resetGrid()
 {
   fill(grid_num.begin(), grid_num.end(), TYPE_UNKNOWN);
@@ -187,6 +241,18 @@ void VIOManager::resetGrid()
   // sample_points.clear();
 // }
 
+/**
+ * @brief 计算投影雅可比矩阵
+ * 
+ * 该函数计算3D点投影到2D图像平面时的雅可比矩阵。雅可比矩阵表示投影方程对3D点坐标的偏导数。
+ * 
+ * @param p 3D点坐标 (x,y,z)
+ * @param J 输出的2x3雅可比矩阵
+ *          J = [ fx/z     0    -fx*x/z^2 ]
+ *              [   0    fy/z   -fy*y/z^2 ]
+ * 
+ * @note fx,fy为相机内参中的焦距参数
+ */
 void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
 {
   const double x = p[0];
@@ -201,6 +267,19 @@ void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
   J(1, 2) = -fy * y * z_inv_2;
 }
 
+/**
+ * @brief 从图像中提取图像块(patch)并进行双线性插值
+ * 
+ * @param img 输入图像
+ * @param pc 特征点在图像中的坐标 (u,v)
+ * @param patch_tmp 输出的图像块数据
+ * @param level 图像金字塔层级
+ * 
+ * @details 该函数在给定特征点位置周围提取固定大小的图像块。
+ *          使用双线性插值来处理亚像素精度的采样。
+ *          考虑不同金字塔层级的尺度变换。
+ *          插值权重由特征点坐标的小数部分决定。
+ */
 void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
 {
   const float u_ref = pc[0];
@@ -225,6 +304,19 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   }
 }
 
+/**
+ * @brief 将视觉特征点插入体素地图
+ * 
+ * @param pt_new 待插入的视觉特征点指针
+ * 
+ * @details 该函数将视觉特征点按照体素化的方式存储到地图中。
+ * 具体步骤如下:
+ * 1. 将特征点坐标除以体素大小(0.5m)获取体素索引
+ * 2. 对于负值坐标进行向下取整处理
+ * 3. 查找该体素位置是否已存在:
+ *    - 若存在,则将特征点加入该体素并更新计数
+ *    - 若不存在,则创建新体素并加入特征点
+ */
 void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 {
   V3D pt_w(pt_new->pos_[0], pt_new->pos_[1], pt_new->pos_[2]);
@@ -250,6 +342,19 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
   }
 }
 
+/**
+ * @brief 计算仿射变换矩阵和单应性矩阵
+ * 
+ * 该函数用于计算当前帧和参考帧之间的仿射变换矩阵。通过单应性矩阵投影来计算仿射变换。
+ * 
+ * @param cam 相机模型对象
+ * @param px_ref 参考帧中的像素坐标
+ * @param xyz_ref 参考帧中的3D点坐标
+ * @param normal_ref 参考帧中的法向量
+ * @param T_cur_ref 当前帧到参考帧的变换矩阵
+ * @param level_ref 参考帧的金字塔层级
+ * @param A_cur_ref [输出] 计算得到的仿射变换矩阵
+ */
 void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
                                                   const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
 {
@@ -273,6 +378,23 @@ void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, co
   A_cur_ref.col(1) = (px_dv_cur - px_cur) / kHalfPatchSize;
 }
 
+/**
+ * @brief 计算仿射变换矩阵用于图像配准
+ * 
+ * @param cam 相机模型对象
+ * @param px_ref 参考图像中的像素坐标
+ * @param f_ref 参考图像中的单位方向向量
+ * @param depth_ref 参考点的深度值
+ * @param T_cur_ref 当前帧到参考帧的变换矩阵
+ * @param level_ref 参考图像金字塔层级
+ * @param pyramid_level 当前处理的图像金字塔层级
+ * @param halfpatch_size 图像块半宽度
+ * @param A_cur_ref 输出的仿射变换矩阵
+ * 
+ * @details 该函数计算从参考图像到当前图像的仿射变换矩阵。
+ * 通过计算参考图像中的点及其周围点在当前图像中的投影位置，
+ * 得到用于图像块匹配的仿射变换关系。
+ */
 void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref,
                                         const SE3<double> &T_cur_ref, const int level_ref, const int pyramid_level, const int halfpatch_size,
                                         Matrix2d &A_cur_ref)
@@ -290,6 +412,21 @@ void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector
   A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
 }
 
+/**
+ * @brief 对图像块进行仿射变换
+ * @param A_cur_ref 当前帧到参考帧的仿射变换矩阵
+ * @param img_ref 参考帧图像
+ * @param px_ref 参考帧中的像素坐标
+ * @param level_ref 参考帧金字塔层级
+ * @param search_level 搜索层级
+ * @param pyramid_level 当前金字塔层级
+ * @param halfpatch_size 图像块半宽度
+ * @param patch 输出的变换后图像块数据
+ * 
+ * @details 该函数对给定的图像块进行仿射变换。首先计算从参考帧到当前帧的逆变换矩阵,
+ * 然后对patch中的每个像素进行变换并进行双线性插值,得到变换后的图像块。
+ * 如果变换后的像素坐标超出图像范围,则将对应位置设为0。
+ */
 void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                                const int pyramid_level, const int halfpatch_size, float *patch)
 {
@@ -318,6 +455,16 @@ void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
   }
 }
 
+/**
+ * @brief 根据图像变换矩阵确定最佳搜索层级
+ * @param A_cur_ref 当前帧与参考帧之间的仿射变换矩阵(2x2)
+ * @param max_level 金字塔最大层级数
+ * @return 最佳搜索层级
+ * 
+ * 该函数通过计算仿射变换矩阵的行列式,自适应地选择特征匹配时的金字塔层级。
+ * 当图像变换较大时(行列式>3.0),会选择更高的金字塔层级以提高匹配鲁棒性。
+ * 每上升一层,行列式值会缩小为原来的1/4。
+ */
 int VIOManager::getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level)
 {
   // Compute patch level in other image
@@ -331,6 +478,17 @@ int VIOManager::getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_leve
   return search_level;
 }
 
+/**
+ * @brief 计算两个图像块之间的归一化互相关系数(NCC)
+ * 
+ * 该函数计算两个给定图像块之间的归一化互相关系数,用于评估两个图像块的相似度。
+ * NCC值范围在[-1,1]之间,1表示完全正相关,0表示不相关,-1表示完全负相关。
+ * 
+ * @param ref_patch 参考图像块的像素值数组
+ * @param cur_patch 当前图像块的像素值数组  
+ * @param patch_size 图像块的像素总数
+ * @return double 返回计算得到的NCC系数
+ */
 double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_size)
 {
   double sum_ref = std::accumulate(ref_patch, ref_patch + patch_size, 0.0);
@@ -350,6 +508,20 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
 }
 
+/**
+ * @brief 从视觉稀疏地图中检索特征点
+ * 
+ * 该函数从已有的视觉稀疏地图中检索特征点,用于视觉-惯性里程计。主要步骤包括:
+ * 1. 将当前帧中的特征点投影到图像平面,生成深度图
+ * 2. 对每个体素进行视野检查,删除不在视野内的体素
+ * 3. 如果启用光线投射,对未观测到特征的区域进行光线投射检测
+ * 4. 对检索到的特征点进行深度连续性和光度一致性检查
+ * 5. 计算特征点的仿射变换矩阵,用于图像配准
+ * 
+ * @param img 当前帧的图像
+ * @param pg 当前帧中的特征点集合
+ * @param plane_map 平面地图,用于光线投射检测
+ */
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (feat_map.size() <= 0) return;
@@ -782,6 +954,18 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   printf("[ VIO ] Retrieve %d points from visual sparse map\n", total_points);
 }
 
+/**
+ * @brief 计算雅可比矩阵并更新 EKF(扩展卡尔曼滤波器)
+ * 
+ * 该函数在视觉惯性里程计(VIO)系统中执行以下操作:
+ * 1. 如果没有特征点则直接返回
+ * 2. 从高到低逐层处理图像金字塔
+ * 3. 根据是否启用反向组合法选择不同的状态更新方式
+ * 4. 更新系统状态协方差
+ * 5. 更新关键帧状态
+ * 
+ * @param img 输入的图像帧
+ */
 void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
   if (total_points == 0) return;
@@ -802,6 +986,21 @@ void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
   updateFrameState(*state);
 }
 
+
+/**
+ * @brief 从点云和体素地图中生成视觉地图点
+ * 
+ * 该函数将点云和体素地图中的点投影到当前帧图像上,根据 Shi-Tomasi 角点响应值
+ * 选择合适的点作为视觉地图点。主要步骤:
+ * 1. 遍历点云中的点,投影到图像上并计算角点响应值
+ * 2. 遍历体素地图中的点,投影到图像上并计算角点响应值  
+ * 3. 对选中的点,计算法向量并创建新的视觉地图点
+ * 4. 将新的视觉地图点插入到体素地图中
+ *
+ * @param img 当前帧的图像
+ * @param pg 输入的点云数据,包含点的位置和方差信息
+ * @return void
+ */
 void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 {
   if (pg.size() <= 10) return;
@@ -906,6 +1105,21 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   // printf("B2. : %.6lf \n", t_b2);
 }
 
+/**
+ * @brief 更新视觉地图点的观测特征
+ * 
+ * 该函数用于更新视觉子地图中地图点的观测特征。主要包含以下步骤:
+ * 1. 检查时间间隔
+ * 2. 计算位姿变化(平移和旋转)
+ * 3. 计算像素距离
+ * 
+ * 当满足更新条件时,会为地图点添加新的观测特征。同时维护每个3D点的观测特征数量不超过30个。
+ * 
+ * @param img 当前帧的图像
+ * @note 更新条件包括:
+ *       - 位姿变化: 平移>0.5m 或 旋转>0.3rad
+ *       - 像素距离: >40像素
+ */
 void VIOManager::updateVisualMapPoints(cv::Mat img)
 {
   if (total_points == 0) return;
@@ -967,6 +1181,21 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
   printf("[ VIO ] Update %d points in visual submap\n", update_num);
 }
 
+/**
+ * @brief 更新视觉特征点的参考图像块
+ * 
+ * 该函数主要完成两个任务:
+ * 1. 利用平面信息更新特征点的法向量,当法向量收敛时将特征点标记为收敛
+ * 2. 为每个特征点选择最优的参考图像块,通过计算NCC(归一化互相关)得分和视角夹角来评估
+ * 
+ * @param plane_map 体素平面地图,存储了场景中检测到的平面信息
+ * 
+ * @note 函数会跳过以下特征点:
+ *       - 未初始化法向量的点
+ *       - 已经收敛的点  
+ *       - 观测次数少于5次的点
+ *       - update_flag为0的点
+ */
 void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (total_points == 0) return;
@@ -1100,6 +1329,19 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
   }
 }
 
+/**
+ * @brief 将参考帧中的图像块投影到当前帧
+ * 
+ * 该函数实现了将参考帧中的特征点对应的图像块投影到当前帧的功能。主要步骤包括:
+ * 1. 计算参考帧和当前帧之间的仿射变换矩阵
+ * 2. 根据特征点的法向量和位姿信息进行投影变换
+ * 3. 对投影后的图像块进行插值采样
+ * 4. 计算光度误差并可视化结果
+ * 
+ * @param plane_map 体素八叉树平面地图
+ * @note 函数会将结果保存在 Log/ref_cur_combine/ 目录下
+ * @note 投影结果包括普通投影、考虑法向量的投影以及光度误差图
+ */
 void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (total_points == 0) return;
@@ -1325,6 +1567,21 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
   cv::imwrite(dir + std::to_string(new_frame_->id_) + "_0_" + "normal" + ".png", ref_cur_combine_normal);
 }
 
+
+/**
+ * @brief 预计算参考图像块的雅可比矩阵
+ * 
+ * 该函数对视觉特征点的参考图像块进行预计算,生成投影雅可比矩阵。
+ * 主要步骤包括:
+ * 1. 计算每个特征点的深度和投影信息
+ * 2. 对图像块进行双线性插值采样
+ * 3. 计算图像梯度
+ * 4. 计算关于位姿的雅可比矩阵
+ * 
+ * @param level 图像金字塔层级
+ * @note 计算结果存储在 H_sub_inv 成员变量中
+ * @note 函数执行完成后会设置 has_ref_patch_cache 标志
+ */
 void VIOManager::precomputeReferencePatches(int level)
 {
   double t1 = omp_get_wtime();
@@ -1396,6 +1653,21 @@ void VIOManager::precomputeReferencePatches(int level)
   has_ref_patch_cache = true;
 }
 
+/**
+ * @brief 基于图像观测更新状态的逆向优化方法
+ * 
+ * 该函数通过最小化当前图像与参考图像块之间的光度误差来优化位姿。
+ * 使用迭代的 EKF 方法进行状态更新,包含以下主要步骤:
+ * 1. 计算当前图像与参考图像块的光度误差
+ * 2. 构建雅可比矩阵
+ * 3. 基于 EKF 更新状态估计
+ * 
+ * @param img 当前图像帧
+ * @param level 图像金字塔层级
+ * 
+ * @note 该函数依赖于类成员变量中预先计算的参考图像块
+ * @note 使用 OpenMP 进行并行计算以提高性能
+ */
 void VIOManager::updateStateInverse(cv::Mat img, int level)
 {
   if (total_points == 0) return;
@@ -1518,6 +1790,22 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
   }
 }
 
+/**
+ * @brief 更新VIO系统状态
+ * 
+ * 该函数通过最小化图像残差来优化VIO系统状态。使用迭代EKF方法,计算图像特征点的投影误差,
+ * 并更新系统状态(包括位姿和曝光时间)。主要步骤包括:
+ * 1. 计算当前状态下特征点的投影位置
+ * 2. 计算图像残差和雅可比矩阵
+ * 3. 使用EKF更新状态估计
+ * 
+ * @param img 当前图像帧
+ * @param level 图像金字塔层级
+ * 
+ * @note 函数使用OpenMP进行并行计算以提高性能
+ * @note 如果没有特征点(total_points=0)则直接返回
+ * @note 使用迭代策略,当收敛或达到最大迭代次数时停止
+ */
 void VIOManager::updateState(cv::Mat img, int level)
 {
   if (total_points == 0) return;
@@ -1688,6 +1976,13 @@ void VIOManager::updateState(cv::Mat img, int level)
   // if (state->inv_expo_time < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
 }
 
+/**
+ * @brief 更新关键帧的位姿状态
+ * @details 根据IMU状态更新相机在世界坐标系下的位姿。将IMU坐标系下的位姿转换到相机坐标系下,
+ *          并更新关键帧的位姿变换矩阵T_f_w_。
+ * @param[in] state IMU状态组,包含旋转和位置信息
+ * @note 通过归一化四元数确保旋转矩阵正交性
+ */
 void VIOManager::updateFrameState(StatesGroup state)
 {
   M3D Rwi(state.rot_end);
@@ -1740,6 +2035,16 @@ void VIOManager::plotTrackedPoints()
   // cv::putText(img_cp, text, origin, cv::FONT_HERSHEY_COMPLEX, 0.7, cv::Scalar(0, 255, 0), 2, 8, 0);
 }
 
+/**
+ * @brief 在图像中进行双线性插值获取像素值
+ * @param img 输入图像(BGR格式)
+ * @param pc 待插值的像素坐标(x,y)
+ * @return 插值后的BGR像素值
+ * 
+ * 该函数使用双线性插值方法计算给定浮点坐标处的像素值。
+ * 通过计算周围4个整数坐标像素的加权平均值得到插值结果。
+ * 权重基于目标点到4个相邻整数坐标点的距离计算。
+ */
 V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
 {
   const float u_ref = pc[0];
@@ -1784,6 +2089,23 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
+/**
+ * @brief 处理单帧图像的主要函数
+ * 
+ * 该函数执行视觉惯性里程计(VIO)的主要处理流程,包括:
+ * - 图像预处理(调整大小、灰度转换)
+ * - 从稀疏地图中提取特征点
+ * - 计算雅可比矩阵并更新EKF
+ * - 生成新的视觉地图点
+ * - 更新视觉地图点和参考图像块
+ * 
+ * @param img 输入的图像帧
+ * @param pg 带有方差的点云数据
+ * @param feat_map 体素八叉树特征地图
+ * @param img_time 图像时间戳
+ * 
+ * @note 函数会记录并输出各个处理阶段的时间消耗统计
+ */
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
   if (width != img.cols || height != img.rows)

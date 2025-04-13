@@ -1,3 +1,29 @@
+/**
+ * @brief 点云预处理类
+ * 
+ * 该类负责对不同类型激光雷达的点云数据进行预处理,包括:
+ * - 点云降采样和滤波
+ * - 特征点提取(平面特征和边缘特征)
+ * - 异常点过滤
+ * - 时间戳处理
+ * 
+ * 支持的激光雷达类型:
+ * - AVIA
+ * - Ouster64 
+ * - Velodyne16
+ * - L515
+ * - XT32
+ * - Pandar128
+ * 
+ * 主要参数配置:
+ * - 特征提取开关
+ * - 激光雷达类型
+ * - 点云盲区阈值
+ * - 点云滤波采样间隔
+ * - 距离、角度等阈值参数
+ * 
+ * 输出处理后的点云数据供后续建图和定位使用
+ */
 /* 
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
@@ -15,6 +41,22 @@ which is included as part of this source code package.
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
+/**
+ * @brief Preprocess类的构造函数
+ * 
+ * 初始化激光雷达预处理相关的参数配置:
+ * - 设置特征提取参数
+ * - 设置激光雷达类型为AVIA
+ * - 设置点云盲区阈值
+ * - 设置点云滤波采样间隔
+ * - 设置距离、角度等阈值参数
+ * - 将角度阈值转换为弧度制
+ * 
+ * 主要用于激光雷达点云数据的预处理,包括:
+ * - 点云降采样
+ * - 特征点提取
+ * - 异常点过滤等
+ */
 Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
   inf_bound = 10;
@@ -51,12 +93,32 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
+/**
+ * @brief 处理来自 Livox 激光雷达的点云数据
+ * @param[in] msg 输入的 Livox 自定义消息
+ * @param[out] pcl_out 输出的点云数据
+ * 
+ * 该函数将 Livox 激光雷达的原始消息转换为点云数据。
+ * 通过调用 avia_handler 处理原始消息,并将结果存储在 pl_surf 中,
+ * 最后将处理后的点云数据赋值给输出参数 pcl_out。
+ */
 void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   avia_handler(msg);
   *pcl_out = pl_surf;
 }
 
+/**
+ * @brief 处理激光雷达点云数据
+ * 
+ * 根据不同类型的激光雷达(Ouster-64线、Velodyne-16线、L515、XT32、Pandar-128线等)
+ * 调用相应的处理函数对点云数据进行预处理
+ * 
+ * @param msg 输入的原始点云消息
+ * @param pcl_out 输出的处理后点云数据
+ * 
+ * @note 处理后的点云数据存储在 pl_surf 中,并通过 pcl_out 指针返回
+ */
 void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   switch (lidar_type)

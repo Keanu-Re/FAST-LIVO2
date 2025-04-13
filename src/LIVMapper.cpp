@@ -1,3 +1,23 @@
+/**
+* @brief LIVO系统的主要实现类
+* 
+* 该类实现了基于LiDAR、IMU和相机的多传感器融合定位系统,包含以下主要功能:
+* - 多传感器数据同步与处理
+* - IMU预积分与状态传播
+* - LiDAR点云配准与建图
+* - 视觉特征提取与跟踪
+* - 多传感器融合状态估计
+* - 实时位姿输出与可视化
+*
+* 系统支持三种工作模式:
+* - LIVO: LiDAR-IMU-Visual里程计
+* - LIO: LiDAR-IMU里程计 
+* - LO: 纯LiDAR里程计
+*
+* @author Chunran Zheng <zhengcr@connect.hku.hk>
+* @note 商业使用请联系作者
+*/
+
 /* 
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
@@ -111,6 +131,19 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->declare_parameter<bool>("publish.pub_effect_point_en", false);
   this->node->declare_parameter<bool>("publish.dense_map_en", false);
 
+  this->node->declare_parameter<std::string>("camera.model", "Pinhole");
+  this->node->declare_parameter<int>("camera.width", 11); 
+  this->node->declare_parameter<int>("camera.height", 11);
+  this->node->declare_parameter<double>("camera.scale", 0.5);
+  this->node->declare_parameter<double>("camera.fx", 1293.56944);
+  this->node->declare_parameter<double>("camera.fy", 1293.3155);
+  this->node->declare_parameter<double>("camera.cx", 626.91359);
+  this->node->declare_parameter<double>("camera.cy", 522.799224);
+  this->node->declare_parameter<double>("camera.d0", 0.0);
+  this->node->declare_parameter<double>("camera.d1", 0.123001);
+  this->node->declare_parameter<double>("camera.d2", -0.00113);
+  this->node->declare_parameter<double>("camera.d3", 0.000251);
+
   // get parameter
   this->node->get_parameter("common.lid_topic", lid_topic);
   this->node->get_parameter("common.imu_topic", imu_topic);
@@ -171,6 +204,20 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.dense_map_en", dense_map_en);
 }
 
+/**
+ * @brief 初始化SLAM系统的各个组件
+ * 
+ * 该函数负责初始化SLAM系统中的关键组件,包括:
+ * - 点云降采样滤波器参数设置
+ * - 传感器外参矩阵加载与设置
+ * - 相机模型参数加载
+ * - VIO管理器参数配置
+ * - IMU参数设置
+ * - SLAM运行模式确定(LIVO/LIO/LO)
+ * 
+ * @param node ROS2节点指针,用于加载参数
+ * @throw std::runtime_error 相机模型加载失败时抛出异常
+ */
 void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node) 
 {
   downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
@@ -186,7 +233,8 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   voxelmap_manager->extT_ << VEC_FROM_ARRAY(extrinT);
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
 
-  if (!vk::camera_loader::loadFromRosNs(this->node, "parameter_blackboard", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
+  if (!vk::camera_loader::loadFromRosNs(this->node, "camera", vio_manager->cam)) 
+    throw std::runtime_error("Camera model not correctly specified.");
 
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
@@ -327,6 +375,13 @@ void LIVMapper::processImu()
   // std::cout << "[ Mapping ] predict sta: " << state_propagat.pos_end.transpose() << state_propagat.vel_end.transpose() << std::endl;
 }
 
+/**
+ * @brief 状态估计和建图的主要处理函数
+ * 
+ * 根据传感器测量标志(LidarMeasures.lio_vio_flg)选择不同的处理流程:
+ * - 当为VIO模式时,调用handleVIO()进行视觉惯性里程计处理
+ * - 当为LIO或LO模式时,调用handleLIO()进行激光惯性里程计处理
+ */
 void LIVMapper::stateEstimationAndMapping() 
 {
   switch (LidarMeasures.lio_vio_flg) 
@@ -341,6 +396,20 @@ void LIVMapper::stateEstimationAndMapping()
   }
 }
 
+/**
+ * @brief 处理视觉惯性里程计(VIO)相关的数据和状态更新
+ * 
+ * 该函数主要完成以下功能:
+ * - 记录并输出当前状态信息(欧拉角、位置、速度、偏置等)
+ * - 检查点云数据的有效性
+ * - 根据时间戳设置是否需要绘图
+ * - 处理图像帧并更新视觉特征
+ * - 在IMU传播使能时更新EKF状态
+ * - 发布点云和RGB图像数据
+ * - 输出最终状态信息到文件
+ * 
+ * 该函数是FAST-LIVO系统中视觉惯性组合导航的核心处理函数。
+ */
 void LIVMapper::handleVIO() 
 {
   euler_cur = RotMtoEuler(_state.rot_end);
@@ -396,6 +465,23 @@ void LIVMapper::handleVIO()
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 }
 
+/**
+ * @brief 处理LIO(激光惯性里程计)的主要函数
+ * 
+ * 该函数执行以下主要步骤:
+ * 1. 对点云进行降采样处理
+ * 2. 对点云进行坐标变换
+ * 3. 构建和更新体素地图
+ * 4. 进行状态估计
+ * 5. 发布里程计、点云和路径等信息
+ * 6. 更新地图和状态信息
+ * 7. 记录和输出处理时间统计
+ * 
+ * 函数会处理点云数据,进行状态估计,并维护地图。同时输出定位结果和调试信息。
+ * 如果启用了IMU预积分,还会更新EKF状态。
+ * 
+ * @note 该函数是FAST-LIVO系统的核心处理函数之一
+ */
 void LIVMapper::handleLIO() 
 {    
   euler_cur = RotMtoEuler(_state.rot_end);
@@ -594,6 +680,19 @@ void LIVMapper::savePCD()
   }
 }
 
+/**
+ * @brief LIVMapper的主运行函数
+ * 
+ * 该函数实现了LiDAR-IMU-Visual里程计的主要处理流程:
+ * 1. 同步传感器数据包
+ * 2. 处理首帧数据进行初始化
+ * 3. 处理IMU数据进行预积分
+ * 4. 执行状态估计和建图
+ * 5. 最后保存点云地图
+ * 
+ * @param node ROS2节点的共享指针
+ * @note 函数会以5000Hz的频率运行,直到ROS系统退出
+ */
 void LIVMapper::run(rclcpp::Node::SharedPtr &node) 
 {
   rclcpp::Rate rate(5000);
