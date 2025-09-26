@@ -99,30 +99,49 @@ struct LidarMeasureGroup
   };
 };
 
+// 定义 pointWithVar 结构体，用于存储带统计特性的三维点信息
 typedef struct pointWithVar
 {
-  Eigen::Vector3d point_b;     // point in the lidar body frame
-  Eigen::Vector3d point_i;     // point in the imu body frame
-  Eigen::Vector3d point_w;     // point in the world frame
-  Eigen::Matrix3d var_nostate; // the var removed the state covarience
-  Eigen::Matrix3d body_var;
-  Eigen::Matrix3d var;
-  Eigen::Matrix3d point_crossmat;
-  Eigen::Vector3d normal;
+  // 点在不同坐标系下的坐标表示
+  Eigen::Vector3d point_b;     // 激光雷达坐标系下的点坐标
+  Eigen::Vector3d point_i;     // IMU坐标系下的点坐标
+  Eigen::Vector3d point_w;     // 世界坐标系下的点坐标
+
+  // 点的统计特性矩阵
+  Eigen::Matrix3d var_nostate; // 不考虑状态协方差时的点方差矩阵
+  Eigen::Matrix3d body_var;    // 激光雷达坐标系下的点方差矩阵
+  Eigen::Matrix3d var;         // 点的总方差矩阵（可能包含状态协方差）
+  
+  // 几何特性
+  Eigen::Matrix3d point_crossmat; // 点的叉积矩阵（用于外积计算）
+  Eigen::Vector3d normal;        // 点的法向量（用于平面拟合等）
+
+  // 构造函数：初始化所有成员变量为零
   pointWithVar()
   {
-    var_nostate = Eigen::Matrix3d::Zero();
+    // 初始化所有矩阵为零矩阵
+    var_nostate = Eigen::Matrix3d::Zero(); // 3x3零矩阵
     var = Eigen::Matrix3d::Zero();
     body_var = Eigen::Matrix3d::Zero();
     point_crossmat = Eigen::Matrix3d::Zero();
-    point_b = Eigen::Vector3d::Zero();
+
+    // 初始化所有向量为零向量
+    point_b = Eigen::Vector3d::Zero(); // 3维零向量
     point_i = Eigen::Vector3d::Zero();
     point_w = Eigen::Vector3d::Zero();
     normal = Eigen::Vector3d::Zero();
   };
 } pointWithVar;
 
-
+/**
+ * @brief StatesGroup 结构体：表示系统状态组，包含位姿、速度、偏置等状态信息
+ * 
+ * 该结构体用于存储和操作SLAM/VIO系统中的关键状态量，包括：
+ * - 旋转、位置、速度
+ * - 陀螺仪和加速度计偏置
+ * - 重力向量
+ * - 协方差矩阵
+ */
 struct StatesGroup
 {
   StatesGroup()

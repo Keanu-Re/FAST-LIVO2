@@ -349,6 +349,15 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
 }
 
+/** 
+ * @description: 从稀疏地图中检索特征点，并将这些特征点投影到当前帧的图像平面上，
+ * 用于后续的视觉惯性里程计（VIO）处理。
+ * 其核心目标是为当前帧提供足够的视觉特征点，以支持位姿估计和地图更新。
+ * @return {*}
+ * @param {Mat} img
+ * @param {vector<pointWithVar>} &pg
+ * @param {unordered_map<VOXEL_LOCATION, VoxelOctoTree *>} &plane_map
+ */
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (feat_map.size() <= 0) return;
@@ -1783,53 +1792,71 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
-void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
+/**
+ * @brief 处理单帧图像数据，完成视觉-惯性里程计（VIO）的核心流程
+ * @param img 输入图像（OpenCV格式）
+ * @param pg 带统计特性的点云数据
+ * @param feat_map 稀疏特征地图（体素八叉树结构）
+ * @param img_time 图像时间戳
+ */
+void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, 
+                             const unordered_map<VOXEL_LOCATION, VoxelOctoTree*> &feat_map, 
+                             double img_time) 
 {
-  if (width != img.cols || height != img.rows)
-  {
-    if (img.empty()) printf("[ VIO ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+  // ==================== 1. 图像预处理 ====================
+  // 检查图像尺寸是否匹配预设值
+  if (width != img.cols || height != img.rows) {
+    if (img.empty()) printf("[ VIO ] Empty Image!\n");  // 空图像警告
+    // 图像缩放（使用线性插值）
+    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 
+              0, 0, CV_INTER_LINEAR);
   }
-  img_rgb = img.clone();
-  img_cp = img.clone();
-  // img_test = img.clone();
-
-  if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
-
-  new_frame_.reset(new Frame(cam, img));
-  updateFrameState(*state);
   
-  resetGrid();
+  // 克隆图像用于后续处理
+  img_rgb = img.clone();  // 保留彩色图像（如需显示）
+  img_cp = img.clone();   // 用于绘制跟踪点
+  
+  // 转换为灰度图（如果是RGB图像）
+  if (img.channels() == 3) 
+    cv::cvtColor(img, img, CV_BGR2GRAY);
 
-  double t1 = omp_get_wtime();
+  // ==================== 2. 帧初始化 ====================
+  new_frame_.reset(new Frame(cam, img));  // 创建新帧对象
+  updateFrameState(*state);               // 更新帧状态
+  resetGrid();                            // 重置网格（用于特征管理）
 
+  // ==================== 3. 核心处理流程 ====================
+  double t1 = omp_get_wtime();  // 开始计时
+  
+  // 阶段1：从稀疏地图中检索特征
   retrieveFromVisualSparseMap(img, pg, feat_map);
-
   double t2 = omp_get_wtime();
-
+  
+  // 阶段2：计算雅可比矩阵并更新EKF
   computeJacobianAndUpdateEKF(img);
-
   double t3 = omp_get_wtime();
-
+  
+  // 阶段3：生成视觉地图点
   generateVisualMapPoints(img, pg);
-
   double t4 = omp_get_wtime();
   
+  // 阶段4：绘制跟踪点（调试用）
   plotTrackedPoints();
-
+  
+  // 可选：投影参考块到当前帧（用于可视化）
   if (plot_flag) projectPatchFromRefToCur(feat_map);
-
   double t5 = omp_get_wtime();
-
+  
+  // 阶段5：更新视觉地图点
   updateVisualMapPoints(img);
-
   double t6 = omp_get_wtime();
-
+  
+  // 阶段6：更新参考块
   updateReferencePatch(feat_map);
-
   double t7 = omp_get_wtime();
   
-  if(colmap_output_en)  dumpDataForColmap();
+  // 可选：输出数据到Colmap格式
+  if (colmap_output_en) dumpDataForColmap();
 
   frame_count++;
   ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;

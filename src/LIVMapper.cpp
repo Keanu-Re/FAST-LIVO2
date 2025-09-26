@@ -228,9 +228,10 @@ void LIVMapper::gravityAlignment()
   {
     std::cout << "Gravity Alignment Starts" << std::endl;
     V3D ez(0, 0, -1), gz(_state.gravity);
+    //计算从当前重力向量到标准重力方向的四元数旋转
     Quaterniond G_q_I0 = Quaterniond::FromTwoVectors(gz, ez);
     M3D G_R_I0 = G_q_I0.toRotationMatrix();
-
+    //旋转当前状态到标准重力坐标系
     _state.pos_end = G_R_I0 * _state.pos_end;
     _state.rot_end = G_R_I0 * _state.rot_end;
     _state.vel_end = G_R_I0 * _state.vel_end;

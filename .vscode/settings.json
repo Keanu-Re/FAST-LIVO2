@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.sdf": "xml",
+        "*.yaml": "yaml",
+        "*.config": "yaml",
+        "random": "cpp"
+    }
+}

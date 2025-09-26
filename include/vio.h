@@ -83,13 +83,18 @@ public:
 class VIOManager
 {
 public:
-  int grid_size;
-  vk::AbstractCamera *cam;
-  vk::PinholeCamera *pinhole_cam;
-  StatesGroup *state;
-  StatesGroup *state_propagat;
-  M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
-  V3D Pli, Pci, Pcl, Pcw;
+  // ==================== 传感器与配置参数 ====================
+  int grid_size;                          ///< 体素网格尺寸（单位：米）
+  vk::AbstractCamera *cam;                ///< 抽象相机模型基类指针（支持多种投影模型）
+  vk::PinholeCamera *pinhole_cam;         ///< 针孔相机模型实例（用于实际计算）
+  StatesGroup *state;                     ///< 当前系统状态（位姿、速度、偏置等）
+  StatesGroup *state_propagat;            ///< 状态预测值（用于EKF预测步骤）
+
+// ==================== 坐标系变换与几何关系 ====================
+  M3D Rli, Rci, Rcl, Rcw;                ///< 旋转矩阵：IMU-Lidar, Camera-IMU, Camera-Lidar, Camera-World
+  V3D Pli, Pci, Pcl, Pcw;                ///< 平移向量：对应上述坐标系变换
+  M3D Jdphi_dR, Jdp_dt, Jdp_dR;          ///< 雅可比矩阵（用于误差传播计算）
+  
   vector<int> grid_num;
   vector<int> map_index;
   vector<int> border_flag;
