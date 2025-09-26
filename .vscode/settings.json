@@ -3,6 +3,7 @@
         "*.sdf": "xml",
         "*.yaml": "yaml",
         "*.config": "yaml",
-        "random": "cpp"
+        "random": "cpp",
+        "ostream": "cpp"
     }
 }

@@ -241,24 +241,50 @@ void LIVMapper::gravityAlignment()
   }
 }
 
+/**
+ * @brief 处理IMU数据的核心方法
+ * 功能：
+ * 1. 调用IMU处理模块进行状态预测
+ * 2. 可选的重力对齐操作
+ * 3. 更新状态传播和体素地图管理器状态
+ */
 void LIVMapper::processImu() 
 {
+  // 调试用：记录函数开始时间（注释掉的性能统计代码）
   // double t0 = omp_get_wtime();
 
+  // ============= 1. IMU状态预测 =============
+  // 调用IMU处理模块，输入激光雷达测量数据、当前状态和去畸变后的点云
+  // - LidarMeasures: 包含时间戳和传感器数据的结构体
+  // - _state: 当前系统状态（位置、速度、姿态等）
+  // - feats_undistort: 去畸变后的激光雷达点云
   p_imu->Process2(LidarMeasures, _state, feats_undistort);
 
-  if (gravity_align_en) gravityAlignment();
+  // ============= 2. 重力对齐（可选） =============
+  // 如果启用重力对齐标志，调用重力对齐函数
+  // 功能：根据加速度计数据调整姿态，使Z轴对齐重力方向
+  if (gravity_align_en) 
+    gravityAlignment();
 
+  // ============= 3. 状态传播更新 =============
+  // 将当前状态保存到状态传播变量（用于后续预测）
   state_propagat = _state;
+
+  // 更新体素地图管理器的状态和点云数据
+  // - state_: 系统状态（用于地图构建时的坐标转换）
+  // - feats_undistort_: 去畸变后的点云（用于地图更新）
   voxelmap_manager->state_ = _state;
   voxelmap_manager->feats_undistort_ = feats_undistort;
 
+  // 调试用：记录状态传播完成时间（注释掉的性能统计代码）
   // double t_prop = omp_get_wtime();
 
+  // 调试用：打印预测状态信息（注释掉的日志代码）
   // std::cout << "[ Mapping ] feats_undistort: " << feats_undistort->size() << std::endl;
   // std::cout << "[ Mapping ] predict cov: " << _state.cov.diagonal().transpose() << std::endl;
   // std::cout << "[ Mapping ] predict sta: " << state_propagat.pos_end.transpose() << state_propagat.vel_end.transpose() << std::endl;
 }
+
 
 void LIVMapper::stateEstimationAndMapping() 
 {
@@ -329,122 +355,141 @@ void LIVMapper::handleVIO()
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 }
 
-void LIVMapper::handleLIO() 
-{    
+/**
+ * @brief 处理LIO（激光惯性里程计）数据的主函数
+ * 功能：完成点云预处理、体素地图构建、状态估计、位姿发布等全流程
+ */
+void LIVMapper::handleLIO() {
+  // ============= 1. 初始化输出和状态 =============
+  // 将旋转矩阵转换为欧拉角
   euler_cur = RotMtoEuler(_state.rot_end);
-  fout_pre << setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
-           << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+  // 输出当前状态到文件（时间戳、欧拉角、位置、速度、IMU偏置等）
+  fout_pre << setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " 
+           << euler_cur.transpose() * 57.3 << " " << _state.pos_end.transpose() << " " 
+           << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " " 
            << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << endl;
-           
-  if (feats_undistort->empty() || (feats_undistort == nullptr)) 
-  {
+
+  // ============= 2. 点云有效性检查 =============
+  if (feats_undistort->empty() || (feats_undistort == nullptr)) {
     std::cout << "[ LIO ]: No point!!!" << std::endl;
-    return;
+    return; // 无有效点云时直接返回
   }
 
-  double t0 = omp_get_wtime();
+  // ============= 3. 点云降采样 =============
+  double t0 = omp_get_wtime(); // 记录起始时间
+  downSizeFilterSurf.setInputCloud(feats_undistort); // 设置输入点云
+  downSizeFilterSurf.filter(*feats_down_body);       // 执行降采样
+  double t_down = omp_get_wtime(); // 记录降采样完成时间
 
-  downSizeFilterSurf.setInputCloud(feats_undistort);
-  downSizeFilterSurf.filter(*feats_down_body);
-  
-  double t_down = omp_get_wtime();
-
-  feats_down_size = feats_down_body->points.size();
-  voxelmap_manager->feats_down_body_ = feats_down_body;
+  // ============= 4. 点云坐标变换 =============
+  feats_down_size = feats_down_body->points.size(); // 获取降采样后点云数量
+  voxelmap_manager->feats_down_body_ = feats_down_body; // 存储体坐标系点云
+  // 将点云从体坐标系变换到世界坐标系
   transformLidar(_state.rot_end, _state.pos_end, feats_down_body, feats_down_world);
-  voxelmap_manager->feats_down_world_ = feats_down_world;
-  voxelmap_manager->feats_down_size_ = feats_down_size;
-  
-  if (!lidar_map_inited) 
-  {
+  voxelmap_manager->feats_down_world_ = feats_down_world; // 存储世界坐标系点云
+  voxelmap_manager->feats_down_size_ = feats_down_size;   // 存储点云数量
+
+  // ============= 5. 体素地图初始化 =============
+  if (!lidar_map_inited) {
     lidar_map_inited = true;
-    voxelmap_manager->BuildVoxelMap();
+    voxelmap_manager->BuildVoxelMap(); // 首次运行时构建体素地图
+  }
+  double t1 = omp_get_wtime(); // 记录地图初始化完成时间
+
+  // ============= 6. 状态估计 =============
+  voxelmap_manager->StateEstimation(state_propagat); // 基于体素地图的状态估计
+  _state = voxelmap_manager->state_;                // 更新系统状态
+  _pv_list = voxelmap_manager->pv_list_;            // 更新点-面关联列表
+  double t2 = omp_get_wtime(); // 记录状态估计完成时间
+
+  // ============= 7. IMU传播标志更新 =============
+  if (imu_prop_enable) {
+    ekf_finish_once = true; // 标记EKF完成
+    latest_ekf_state = _state; // 存储最新状态
+    latest_ekf_time = LidarMeasures.last_lio_update_time; // 存储最新时间戳
+    state_update_flg = true; // 设置状态更新标志
   }
 
-  double t1 = omp_get_wtime();
-
-  voxelmap_manager->StateEstimation(state_propagat);
-  _state = voxelmap_manager->state_;
-  _pv_list = voxelmap_manager->pv_list_;
-
-  double t2 = omp_get_wtime();
-
-  if (imu_prop_enable) 
-  {
-    ekf_finish_once = true;
-    latest_ekf_state = _state;
-    latest_ekf_time = LidarMeasures.last_lio_update_time;
-    state_update_flg = true;
-  }
-
-  if (pose_output_en) 
-  {
+  // ============= 8. 位姿输出到文件 =============
+  if (pose_output_en) {
     static bool pos_opend = false;
     static int ocount = 0;
     std::ofstream outFile, evoFile;
-    if (!pos_opend) 
-    {
+    // 首次打开文件
+    if (!pos_opend) {
       evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::out);
       pos_opend = true;
       if (!evoFile.is_open()) ROS_ERROR("open fail\n");
     } 
-    else 
-    {
+    // 后续追加写入
+    else {
       evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::app);
       if (!evoFile.is_open()) ROS_ERROR("open fail\n");
     }
-    Eigen::Matrix4d outT;
+    // 写入位姿数据（时间戳、位置、四元数）
     Eigen::Quaterniond q(_state.rot_end);
-    evoFile << std::fixed;
-    evoFile << LidarMeasures.last_lio_update_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
+    evoFile << std::fixed << LidarMeasures.last_lio_update_time << " " 
+            << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
             << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
   }
-  
-  euler_cur = RotMtoEuler(_state.rot_end);
+
+  // ============= 9. 发布里程计信息 =============
+  euler_cur = RotMtoEuler(_state.rot_end); // 重新计算欧拉角
+  // 创建四元数消息
   geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
-  publish_odometry(pubOdomAftMapped);
+  publish_odometry(pubOdomAftMapped); // 发布里程计
+  double t3 = omp_get_wtime(); // 记录发布完成时间
 
-  double t3 = omp_get_wtime();
-
+  // ============= 10. 体素地图更新 =============
   PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
+  // 将降采样后的点云变换到世界坐标系
   transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
-  for (size_t i = 0; i < world_lidar->points.size(); i++) 
-  {
-    voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
+  // 更新每个点的世界坐标和协方差
+  for (size_t i = 0; i < world_lidar->points.size(); i++) {
+    voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, 
+                                           world_lidar->points[i].y, 
+                                           world_lidar->points[i].z;
+    // 计算综合协方差（考虑旋转和平移不确定性）
     M3D point_crossmat = voxelmap_manager->cross_mat_list_[i];
     M3D var = voxelmap_manager->body_cov_list_[i];
     var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
-          (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
-    voxelmap_manager->pv_list_[i].var = var;
+          (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + 
+          _state.cov.block<3, 3>(3, 3);
+    voxelmap_manager->pv_list_[i].var = var; // 存储更新后的协方差
   }
-  voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
+  voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_); // 执行地图更新
   std::cout << "[ LIO ] Update Voxel Map" << std::endl;
-  _pv_list = voxelmap_manager->pv_list_;
-  
-  double t4 = omp_get_wtime();
+  _pv_list = voxelmap_manager->pv_list_; // 更新点-面关联列表
+  double t4 = omp_get_wtime(); // 记录地图更新完成时间
 
-  if(voxelmap_manager->config_setting_.map_sliding_en)
-  {
-    voxelmap_manager->mapSliding();
+  // ============= 11. 地图滑动窗口处理 =============
+  if(voxelmap_manager->config_setting_.map_sliding_en) {
+    voxelmap_manager->mapSliding(); // 执行滑动窗口优化
   }
-  
+
+  // ============= 12. 发布点云数据 =============
+  // 选择全分辨率或降采样点云
   PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
   int size = laserCloudFullRes->points.size();
   PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
-
-  for (int i = 0; i < size; i++) 
-  {
+  // 将点云变换到世界坐标系
+  for (int i = 0; i < size; i++) {
     RGBpointBodyToWorld(&laserCloudFullRes->points[i], &laserCloudWorld->points[i]);
   }
-  *pcl_w_wait_pub = *laserCloudWorld;
+  *pcl_w_wait_pub = *laserCloudWorld; // 存储待发布点云
 
+  // 根据配置发布不同类型的点云
   if (!img_en) publish_frame_world(pubLaserCloudFullRes, vio_manager);
   if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);
   if (voxelmap_manager->config_setting_.is_pub_plane_map_) voxelmap_manager->pubVoxelMap();
-  publish_path(pubPath);
-  publish_mavros(mavros_pose_publisher);
+  
+  // ============= 13. 发布路径和MAVROS消息 =============
+  publish_path(pubPath); // 发布运动路径
+  publish_mavros(mavros_pose_publisher); // 发布MAVROS兼容位姿
 
-  frame_num++;
+  // ============= 14. 性能统计 =============
+  frame_num++; // 更新帧计数器
+  // 计算平均耗时（指数平滑）
   aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t4 - t0) / frame_num;
 
   // aver_time_icp = aver_time_icp * (frame_num - 1) / frame_num + (t2 - t1) / frame_num;

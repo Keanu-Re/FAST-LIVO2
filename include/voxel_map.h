@@ -126,63 +126,117 @@ struct DS_POINT
 
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov);
 
-class VoxelOctoTree
-{
-
+/**
+ * @class VoxelOctoTree
+ * @brief 基于八叉树的体素地图节点类，用于高效存储和管理三维空间中的点云数据
+ * 
+ * 核心功能：
+ * 1. 分层存储点云数据（支持动态扩展）
+ * 2. 平面特征提取与拟合
+ * 3. 增量式地图更新
+ * 4. 空间快速检索
+ */
+class VoxelOctoTree {
 public:
-  VoxelOctoTree() = default;
-  std::vector<pointWithVar> temp_points_;
-  VoxelPlane *plane_ptr_;
-  int layer_;
-  int octo_state_; // 0 is end of tree, 1 is not
-  VoxelOctoTree *leaves_[8];
-  double voxel_center_[3]; // x, y, z
-  std::vector<int> layer_init_num_;
-  float quater_length_;
-  float planer_threshold_;
-  int points_size_threshold_;
-  int update_size_threshold_;
-  int max_points_num_;
-  int max_layer_;
-  int new_points_;
-  bool init_octo_;
-  bool update_enable_;
+  // ==================== 数据结构 ====================
+  std::vector<pointWithVar> temp_points_;  ///< 临时存储的原始点云（带协方差信息）
+  VoxelPlane *plane_ptr_;                 ///< 拟合的平面特征指针
+  int layer_;                             ///< 当前节点在八叉树中的层数（0为根节点）
+  int octo_state_;                        ///< 八叉树节点状态：0-终止节点，1-可继续分割
+  VoxelOctoTree *leaves_[8];              ///< 子节点指针数组（八叉树结构）
+  double voxel_center_[3];                ///< 当前体素中心坐标（x,y,z）
+  
+  // ==================== 配置参数 ====================
+  std::vector<int> layer_init_num_;       ///< 各层初始点数统计
+  float quater_length_;                   ///< 当前体素边长的一半
+  float planer_threshold_;                ///< 平面拟合阈值（距离方差）
+  int points_size_threshold_;             ///< 触发分割的最小点数
+  int update_size_threshold_;             ///< 触发更新的最小点数
+  int max_points_num_;                    ///< 单节点最大点数（内存控制）
+  int max_layer_;                         ///< 八叉树最大深度
+  int new_points_;                        ///< 新增点数统计
+  bool init_octo_;                        ///< 是否已完成初始化
+  bool update_enable_;                    ///< 是否允许更新
 
-  VoxelOctoTree(int max_layer, int layer, int points_size_threshold, int max_points_num, float planer_threshold)
-      : max_layer_(max_layer), layer_(layer), points_size_threshold_(points_size_threshold), max_points_num_(max_points_num),
-        planer_threshold_(planer_threshold)
-  {
+  // ==================== 构造/析构 ====================
+  /**
+   * @brief 构造函数（参数化配置）
+   * @param max_layer 最大树深度
+   * @param layer 当前层数
+   * @param points_size_threshold 分割阈值
+   * @param max_points_num 单节点容量
+   * @param planer_threshold 平面拟合敏感度
+   */
+  VoxelOctoTree(int max_layer, int layer, int points_size_threshold, 
+               int max_points_num, float planer_threshold)
+      : max_layer_(max_layer), layer_(layer), 
+        points_size_threshold_(points_size_threshold),
+        max_points_num_(max_points_num),
+        planer_threshold_(planer_threshold) {
+    // 初始化成员变量
     temp_points_.clear();
     octo_state_ = 0;
     new_points_ = 0;
     update_size_threshold_ = 5;
     init_octo_ = false;
     update_enable_ = true;
-    for (int i = 0; i < 8; i++)
-    {
+    for (int i = 0; i < 8; i++) {
       leaves_[i] = nullptr;
     }
-    plane_ptr_ = new VoxelPlane;
+    plane_ptr_ = new VoxelPlane;  // 默认构造平面
   }
 
-  ~VoxelOctoTree()
-  {
-    for (int i = 0; i < 8; i++)
-    {
+  /// @brief 析构函数（递归释放子节点内存）
+  ~VoxelOctoTree() {
+    for (int i = 0; i < 8; i++) {
       delete leaves_[i];
     }
     delete plane_ptr_;
   }
+
+  // ==================== 核心方法 ====================
+  /**
+   * @brief 基于PCA的平面特征拟合
+   * @param points 输入点云
+   * @param plane 输出平面参数
+   */
   void init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane);
+
+  /**
+   * @brief 初始化八叉树节点（首次分割）
+   * @note 当点数超过阈值时，将当前体素分割为8个子体素
+   */
   void init_octo_tree();
+
+  /**
+   * @brief 剪枝优化（合并相似子节点）
+   */
   void cut_octo_tree();
+
+  /**
+   * @brief 增量式更新节点数据
+   * @param pv 新增点（带协方差）
+   */
   void UpdateOctoTree(const pointWithVar &pv);
 
+  /**
+   * @brief 空间检索（查找包含目标点的最底层节点）
+   * @param pw 目标点坐标
+   * @return 终端节点指针
+   */
   VoxelOctoTree *find_correspond(Eigen::Vector3d pw);
+
+  /**
+   * @brief 插入新点（自动触发分割/更新）
+   * @param pv 待插入点
+   * @return 插入后的终端节点指针
+   */
   VoxelOctoTree *Insert(const pointWithVar &pv);
 };
 
+
 void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config);
+
 
 class VoxelMapManager
 {
@@ -191,11 +245,12 @@ public:
   VoxelMapConfig config_setting_;
   int current_frame_id_ = 0;
   ros::Publisher voxel_map_pub_;
-  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map_;
 
-  PointCloudXYZI::Ptr feats_undistort_;
-  PointCloudXYZI::Ptr feats_down_body_;
-  PointCloudXYZI::Ptr feats_down_world_;
+  // ==================== 数据容器 ====================
+  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map_;//< 体素地图核心数据结构（哈希表+八叉树）
+  PointCloudXYZI::Ptr feats_undistort_; //< 未畸变点云（原始输入）
+  PointCloudXYZI::Ptr feats_down_body_;//< 降采样后体坐标系点云
+  PointCloudXYZI::Ptr feats_down_world_;//< 降采样后世界坐标系点云
 
   M3D extR_;
   V3D extT_;
